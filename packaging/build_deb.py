@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 REPO = Path(__file__).resolve().parent.parent
 
 CONTROL_TPL = """Package: cockpit-rclone
