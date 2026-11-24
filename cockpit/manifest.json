@@ -1,0 +1,23 @@
+{
+    "version": 0,
+    "requires": {
+        "cockpit": "280"
+    },
+    "menu": {
+        "rclone": {
+            "label": "Rclone & Google Drive",
+            "path": "index.html",
+            "order": 85
+        }
+    },
+    "tools": {
+        "index": {
+            "label": "Rclone & Google Drive",
+            "keywords": [
+                {
+                    "matches": ["rclone", "gdrive", "google drive", "sync", "backup", "cloud", "mount", "zfs"]
+                }
+            ]
+        }
+    }
+}

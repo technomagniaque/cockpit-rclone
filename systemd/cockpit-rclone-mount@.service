@@ -1,0 +1,17 @@
+[Unit]
+Description=Montage FUSE cockpit-rclone (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/python3 /usr/lib/cockpit-rclone/rclone-job-runner.py mount-prep %i
+ExecStart=/usr/bin/python3 /usr/lib/cockpit-rclone/rclone-job-runner.py mount %i
+ExecStop=/usr/bin/python3 /usr/lib/cockpit-rclone/rclone-job-runner.py mount-stop %i
+Restart=on-failure
+RestartSec=10s
+KillMode=mixed
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target

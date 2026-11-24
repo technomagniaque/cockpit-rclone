@@ -1,0 +1,11 @@
+[Unit]
+Description=Simulation (dry-run) cockpit-rclone (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/lib/cockpit-rclone/rclone-job-runner.py job-dry %i
+KillMode=mixed
+TimeoutStopSec=30s
+Nice=10

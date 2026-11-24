@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rclone &amp; Google Drive — Cockpit</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="../base1/cockpit.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Rclone &amp; Google Drive</h1>
+      <div id="topbar-subtitle" class="topbar-sub">Chargement de l'état système…</div>
+    </div>
+    <div class="topbar-actions">
+      <label class="muted"><input type="checkbox" id="auto-refresh" checked> Auto 4 s</label>
+      <button type="button" class="btn" id="btn-refresh">Actualiser</button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button type="button" class="tab-btn active" data-tab="dashboard">Tableau de bord &amp; Live</button>
+    <button type="button" class="tab-btn" data-tab="remotes">Remotes &amp; Google Drive</button>
+    <button type="button" class="tab-btn" data-tab="jobs">Sync, Migration &amp; Timers</button>
+    <button type="button" class="tab-btn" data-tab="explorer">Explorateur NAS ↔ Cloud</button>
+    <button type="button" class="tab-btn" data-tab="mounts">Montages FUSE (Z640 &amp; NAS)</button>
+    <button type="button" class="tab-btn" data-tab="serve">Serve &amp; Maintenance</button>
+  </nav>
+
+  <main>
+    <div id="banner" class="alert hidden" role="status">
+      <span id="banner-text"></span>
+      <button type="button" class="btn btn-sm" id="banner-close">Fermer</button>
+    </div>
+
+    <div id="install-warning" class="alert alert-warn hidden">
+      <span><strong>rclone n'est pas encore installé sur cette machine.</strong> Installez <code>apt install rclone fuse3</code> une fois la maintenance terminée pour exécuter les transferts et montages.</span>
+    </div>
+
+    <!-- 1. TABLEAU DE BORD & LIVE -->
+    <section id="tab-dashboard" class="tab-panel active">
+      <div class="grid-3">
+        <div class="card">
+          <div class="muted">Moteur rclone &amp; FUSE</div>
+          <div id="kpi-rclone" class="kpi">—</div>
+          <div id="kpi-fuse" class="muted"></div>
+        </div>
+        <div class="card">
+          <div class="muted">Remotes &amp; Clé OAuth Google</div>
+          <div id="kpi-remotes" class="kpi">—</div>
+          <div id="kpi-oauth" class="muted"></div>
+        </div>
+        <div class="card">
+          <div class="muted">Tâches &amp; Montages actifs</div>
+          <div id="kpi-active" class="kpi">—</div>
+          <div id="kpi-config" class="muted mono"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>Transferts en cours (temps réel via API --rc locale)</h2>
+        </div>
+        <div id="live-transfers">
+          <p class="muted">Aucun transfert actif pour le moment.</p>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header">
+            <h2>Datasets ZFS détectés</h2>
+          </div>
+          <div id="zfs-list">
+            <p class="muted">Aucun dataset ZFS (poste bureau ou ZFS absent).</p>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <h2>Quotas &amp; état des remotes</h2>
+          </div>
+          <div id="dashboard-remotes">
+            <p class="muted">Aucun remote configuré.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. REMOTES -->
+    <section id="tab-remotes" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <h2>Remotes configurés</h2>
+          <button type="button" class="btn btn-primary" id="btn-new-remote">Nouveau remote</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Nom</th>
+              <th>Type</th>
+              <th>Client ID / Options</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="remotes-tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2 id="remote-form-title">Ajouter / Modifier un remote</h2>
+        </div>
+        <form id="remote-form">
+          <div class="form-grid">
+            <div class="field">
+              <label for="rem-name">Nom du remote</label>
+              <input type="text" id="rem-name" placeholder="ex. gdrive, gdrive-crypt" required>
+            </div>
+            <div class="field">
+              <label for="rem-type">Type de backend</label>
+              <select id="rem-type"></select>
+            </div>
+          </div>
+
+          <!-- Assistant dédié Google Drive -->
+          <div id="rem-gdrive-box" class="card" style="background: var(--surface-alt);">
+            <h3>Assistant Google Drive (OAuth personnel anti-bridage)</h3>
+            <div class="form-grid">
+              <div class="field field-full">
+                <label for="rem-oauth-file">Réutiliser la clé API Google déjà créée sur la machine</label>
+                <select id="rem-oauth-file">
+                  <option value="">— Saisie manuelle ou JSON collé ci-dessous —</option>
+                </select>
+                <span class="muted">Le secret OAuth est lu directement côté serveur et écrit en mode 0600 dans rclone.conf (jamais affiché dans le navigateur).</span>
+              </div>
+              <div class="field">
+                <label for="rem-gdrive-scope">Portée (scope)</label>
+                <select id="rem-gdrive-scope">
+                  <option value="drive">drive (accès complet recommandé)</option>
+                  <option value="drive.file">drive.file (fichiers créés par l'app)</option>
+                  <option value="drive.readonly">drive.readonly (lecture seule)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="rem-gdrive-team">Shared Drive / Team Drive ID (optionnel)</label>
+                <input type="text" id="rem-gdrive-team" placeholder="Laisser vide pour Mon Drive">
+              </div>
+              <div class="field">
+                <label for="rem-gdrive-root">Dossier racine root_folder_id (optionnel)</label>
+                <input type="text" id="rem-gdrive-root" placeholder="ID d'un sous-dossier Google Drive">
+              </div>
+              <div class="field">
+                <label for="rem-gdrive-cid">client_id manuel (si pas de fichier détecté)</label>
+                <input type="text" id="rem-gdrive-cid" placeholder="xxx.apps.googleusercontent.com">
+              </div>
+              <div class="field">
+                <label for="rem-gdrive-csec">client_secret manuel</label>
+                <input type="password" id="rem-gdrive-csec" placeholder="Laisser vide pour conserver l'existant">
+              </div>
+              <div class="field field-full">
+                <label for="rem-oauth-json">Ou coller un fichier JSON OAuth Google Cloud / mygdoc (optionnel)</label>
+                <textarea id="rem-oauth-json" placeholder='{"clientId":"...","clientSecret":"..."} ou {"installed":{...}}'></textarea>
+              </div>
+              <div class="field field-full">
+                <div class="btn-group" style="margin-bottom: 6px;">
+                  <button type="button" class="btn btn-sm" id="btn-auth-hint">Afficher la commande rclone authorize (à lancer sur Z640)</button>
+                </div>
+                <pre id="auth-hint-box" class="code-box hidden"></pre>
+              </div>
+              <div class="field field-full">
+                <label for="rem-gdrive-token">Token OAuth JSON obtenu via rclone authorize</label>
+                <textarea id="rem-gdrive-token" placeholder='{"access_token":"...","token_type":"Bearer","refresh_token":"...","expiry":"..."}'></textarea>
+              </div>
+            </div>
+          </div>
+
+          <!-- Assistant Crypt -->
+          <div id="rem-crypt-box" class="card hidden" style="background: var(--surface-alt);">
+            <h3>Assistant Crypt (chiffrement transparent sur Google Drive)</h3>
+            <div class="form-grid">
+              <div class="field">
+                <label for="rem-crypt-remote">Remote cible à chiffrer</label>
+                <input type="text" id="rem-crypt-remote" placeholder="ex. gdrive:coffre-nas">
+              </div>
+              <div class="field">
+                <label for="rem-crypt-fname">Chiffrement des noms</label>
+                <select id="rem-crypt-fname">
+                  <option value="standard">standard (AES noms complets)</option>
+                  <option value="obfuscate">obfuscate (léger)</option>
+                  <option value="off">off (contenu seul chiffré)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="rem-crypt-pass">Mot de passe (chiffré par rclone obscure)</label>
+                <input type="password" id="rem-crypt-pass" placeholder="Mot de passe fort">
+              </div>
+              <div class="field">
+                <label for="rem-crypt-pass2">Sel optionnel (password2)</label>
+                <input type="password" id="rem-crypt-pass2" placeholder="Sel optionnel">
+              </div>
+            </div>
+          </div>
+
+          <!-- Éditeur générique clé=valeur -->
+          <div class="field field-full" style="margin-bottom: 12px;">
+            <label for="rem-extra">Options supplémentaires (une par ligne : <span class="mono">cle = valeur</span>)</label>
+            <textarea id="rem-extra" placeholder="ex.&#10;host = 192.168.0.9&#10;user = eti"></textarea>
+          </div>
+
+          <div class="btn-group">
+            <button type="submit" class="btn btn-primary">Enregistrer le remote</button>
+            <button type="button" class="btn" id="btn-reset-remote">Réinitialiser</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- 3. SYNC, MIGRATION & TIMERS -->
+    <section id="tab-jobs" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <h2>Tâches configurées (systemd services &amp; timers)</h2>
+          <button type="button" class="btn btn-primary" id="btn-new-job">Nouvelle tâche</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Tâche</th>
+              <th>Mode &amp; Profil</th>
+              <th>Source → Destination</th>
+              <th>Planification</th>
+              <th>État</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="jobs-tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2 id="job-form-title">Créer / Modifier une tâche de synchronisation ou migration</h2>
+        </div>
+        <form id="job-form">
+          <div class="form-grid">
+            <div class="field">
+              <label for="job-id">Identifiant (slug)</label>
+              <input type="text" id="job-id" placeholder="ex. nas-p1-vers-gdrive" required>
+            </div>
+            <div class="field">
+              <label for="job-name">Libellé</label>
+              <input type="text" id="job-name" placeholder="Sauvegarde H1/p1 vers Google Drive">
+            </div>
+            <div class="field">
+              <label for="job-mode">Mode rclone</label>
+              <select id="job-mode">
+                <option value="copy">copy (migration sûre, sans suppression)</option>
+                <option value="sync">sync (miroir exact, avec corbeille/backup-dir)</option>
+                <option value="move">move (déplace puis supprime la source)</option>
+                <option value="bisync">bisync (bidirectionnel)</option>
+                <option value="check">check (vérification MD5 / intégrité)</option>
+                <option value="dedupe">dedupe (dédoublonnage Google Drive)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="job-profile">Profil d'optimisation Google Drive</label>
+              <select id="job-profile"></select>
+              <span id="job-profile-desc" class="muted"></span>
+            </div>
+            <div class="field">
+              <label for="job-source">Source (chemin ZFS ou remote:dossier)</label>
+              <input type="text" id="job-source" list="zfs-datalist" placeholder="/H1/p1 ou gdrive:Archives" required>
+              <datalist id="zfs-datalist"></datalist>
+            </div>
+            <div class="field">
+              <label for="job-dest">Destination (remote:dossier ou chemin ZFS)</label>
+              <input type="text" id="job-dest" list="zfs-datalist" placeholder="gdrive:NAS-H1/p1">
+            </div>
+            <div class="field">
+              <label for="job-bwlimit">Limite débit --bwlimit (simple ou horaire)</label>
+              <input type="text" id="job-bwlimit" placeholder="ex. 8.5M ou 08:00,5M 23:00,off">
+            </div>
+            <div class="field">
+              <label for="job-backup-dir">--backup-dir horodaté (sécurité sync/move)</label>
+              <input type="text" id="job-backup-dir" placeholder="ex. gdrive:_corbeille-sync/p1">
+            </div>
+            <div class="field">
+              <label for="job-transfers">Transferts parallèles (optionnel)</label>
+              <input type="number" id="job-transfers" min="1" max="64" placeholder="profil par défaut">
+            </div>
+            <div class="field">
+              <label for="job-checkers">Checkers (optionnel)</label>
+              <input type="number" id="job-checkers" min="1" max="128" placeholder="profil par défaut">
+            </div>
+            <div class="field">
+              <label for="job-chunk">drive-chunk-size (optionnel)</label>
+              <input type="text" id="job-chunk" placeholder="ex. 128M">
+            </div>
+            <div class="field">
+              <label for="job-dedupe-mode">Mode dedupe (si mode = dedupe)</label>
+              <select id="job-dedupe-mode">
+                <option value="rename">rename (renomme sans perdre)</option>
+                <option value="newest">newest (garde le plus récent)</option>
+                <option value="largest">largest (garde le plus gros)</option>
+                <option value="oldest">oldest</option>
+                <option value="skip">skip (liste seulement)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="checkbox-row">
+            <label><input type="checkbox" id="job-zfs-snap" checked> Snapshot ZFS atomique avant transfert (source locale ZFS)</label>
+            <label><input type="checkbox" id="job-checksum"> Vérifier par somme MD5 (--checksum)</label>
+            <label><input type="checkbox" id="job-update"> Ignorer si destination plus récente (--update)</label>
+            <label><input type="checkbox" id="job-skip-gdocs"> Ignorer Google Docs natifs (--drive-skip-gdocs)</label>
+          </div>
+
+          <div class="form-grid">
+            <div class="field">
+              <label for="job-excludes">Filtres --exclude (un motif par ligne)</label>
+              <textarea id="job-excludes" placeholder=".DS_Store&#10;Thumbs.db&#10;*.tmp&#10;.Trash-*/**"></textarea>
+            </div>
+            <div class="field">
+              <label for="job-includes">Filtres --include (optionnel, un par ligne)</label>
+              <textarea id="job-includes" placeholder="Laisser vide pour tout inclure"></textarea>
+            </div>
+          </div>
+
+          <div class="btn-group">
+            <button type="submit" class="btn btn-primary">Enregistrer la tâche</button>
+            <button type="button" class="btn" id="btn-reset-job">Réinitialiser</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- 4. EXPLORATEUR DOUBLE PANNEAU -->
+    <section id="tab-explorer" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <h2>Explorateur double panneau (NAS ZFS ↔ Remotes)</h2>
+          <button type="button" class="btn btn-primary" id="btn-explorer-to-job">Créer une tâche avec ces deux dossiers</button>
+        </div>
+        <div class="explorer-grid">
+          <div>
+            <h3>Panneau gauche (NAS / Local)</h3>
+            <div class="btn-group" style="margin-bottom: 8px;">
+              <input type="text" id="exp-left-path" value="/H1" style="flex: 1;">
+              <button type="button" class="btn btn-sm" id="exp-left-up">↑ Parent</button>
+              <button type="button" class="btn btn-sm btn-primary" id="exp-left-go">Ouvrir</button>
+              <button type="button" class="btn btn-sm" id="exp-left-size">Taille</button>
+              <button type="button" class="btn btn-sm" id="exp-left-mkdir">+ Dossier</button>
+            </div>
+            <div id="exp-left-meta" class="muted" style="margin-bottom: 6px;"></div>
+            <div id="exp-left-list" class="explorer-list"></div>
+          </div>
+
+          <div>
+            <h3>Panneau droit (Google Drive / Remote)</h3>
+            <div class="btn-group" style="margin-bottom: 8px;">
+              <select id="exp-right-remote" style="width: auto;"></select>
+              <input type="text" id="exp-right-path" placeholder="gdrive:" style="flex: 1;">
+              <button type="button" class="btn btn-sm" id="exp-right-up">↑ Parent</button>
+              <button type="button" class="btn btn-sm btn-primary" id="exp-right-go">Ouvrir</button>
+              <button type="button" class="btn btn-sm" id="exp-right-size">Taille</button>
+              <button type="button" class="btn btn-sm" id="exp-right-mkdir">+ Dossier</button>
+            </div>
+            <div id="exp-right-meta" class="muted" style="margin-bottom: 6px;"></div>
+            <div id="exp-right-list" class="explorer-list"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5. MONTAGES FUSE (Z640 & NAS) -->
+    <section id="tab-mounts" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <h2>Montages FUSE persistants (compatible Z640 bureau &amp; debian13zfs1)</h2>
+        </div>
+        <div id="fuse-warning" class="alert alert-warn hidden">
+          <span><code>user_allow_other</code> n'est pas encore activé dans <code>/etc/fuse.conf</code>. L'installation du paquet <code>.deb</code> l'active automatiquement.</span>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Nom</th>
+              <th>Profil</th>
+              <th>Remote → Point de montage</th>
+              <th>UID:GID / Cache</th>
+              <th>État systemd</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="mounts-tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>Créer / Modifier un montage FUSE fiable</h2>
+        </div>
+        <form id="mount-form">
+          <div class="form-grid">
+            <div class="field">
+              <label for="mnt-id">Identifiant</label>
+              <input type="text" id="mnt-id" placeholder="ex. gdrive-z640" required>
+            </div>
+            <div class="field">
+              <label for="mnt-profile">Profil de montage</label>
+              <select id="mnt-profile"></select>
+              <span id="mnt-profile-desc" class="muted"></span>
+            </div>
+            <div class="field">
+              <label for="mnt-remote">Remote et sous-dossier</label>
+              <input type="text" id="mnt-remote" placeholder="ex. gdrive:" required>
+            </div>
+            <div class="field">
+              <label for="mnt-point">Point de montage local</label>
+              <input type="text" id="mnt-point" placeholder="ex. /mnt/rclone/gdrive ou /home/eti/GoogleDrive" required>
+            </div>
+            <div class="field">
+              <label for="mnt-user">Propriétaire des fichiers (UID:GID, idéal pour Z640/Dolphin)</label>
+              <select id="mnt-user"></select>
+            </div>
+            <div class="field">
+              <label for="mnt-cache-dir">Dossier de cache VFS (NVMe sur Z640)</label>
+              <input type="text" id="mnt-cache-dir" value="/var/cache/cockpit-rclone">
+            </div>
+            <div class="field">
+              <label for="mnt-cache-size">Taille max du cache VFS</label>
+              <input type="text" id="mnt-cache-size" placeholder="ex. 20G">
+            </div>
+            <div class="field">
+              <label for="mnt-bwlimit">Limite débit optionnelle</label>
+              <input type="text" id="mnt-bwlimit" placeholder="laisser vide pour illimité">
+            </div>
+          </div>
+          <div class="checkbox-row">
+            <label><input type="checkbox" id="mnt-allow-other" checked> Autoriser les autres utilisateurs (--allow-other)</label>
+            <label><input type="checkbox" id="mnt-ro"> Lecture seule (--read-only)</label>
+          </div>
+          <div class="btn-group">
+            <button type="submit" class="btn btn-primary">Enregistrer le montage</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- 6. SERVE & MAINTENANCE -->
+    <section id="tab-serve" class="tab-panel">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header">
+            <h2>Serveurs rclone serve (WebDAV / HTTP / SFTP / DLNA)</h2>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Protocole</th>
+                <th>Source &amp; Écoute</th>
+                <th>État</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="serves-tbody"></tbody>
+          </table>
+          <form id="serve-form" style="margin-top: 14px;">
+            <div class="form-grid">
+              <div class="field">
+                <label for="srv-id">ID</label>
+                <input type="text" id="srv-id" placeholder="ex. webdav-gdrive" required>
+              </div>
+              <div class="field">
+                <label for="srv-proto">Protocole</label>
+                <select id="srv-proto">
+                  <option value="webdav">webdav</option>
+                  <option value="http">http</option>
+                  <option value="sftp">sftp</option>
+                  <option value="dlna">dlna</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="srv-remote">Remote ou dossier</label>
+                <input type="text" id="srv-remote" placeholder="gdrive:" required>
+              </div>
+              <div class="field">
+                <label for="srv-addr">Adresse d'écoute</label>
+                <input type="text" id="srv-addr" value="127.0.0.1:8088" required>
+              </div>
+              <div class="field">
+                <label for="srv-user">Utilisateur (optionnel)</label>
+                <input type="text" id="srv-user">
+              </div>
+              <div class="field">
+                <label for="srv-pass">Mot de passe (optionnel)</label>
+                <input type="password" id="srv-pass">
+              </div>
+            </div>
+            <div class="checkbox-row">
+              <label><input type="checkbox" id="srv-ro" checked> Lecture seule (--read-only)</label>
+            </div>
+            <button type="submit" class="btn btn-primary">Enregistrer le serveur</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Maintenance ZFS &amp; Diagnostic</h2>
+          </div>
+          <p class="muted">Snapshots ZFS temporaires <code>@cockpit-rclone-*</code> éventuellement laissés après une coupure brutale :</p>
+          <div id="orphan-snaps" style="margin-bottom: 12px;"></div>
+          <button type="button" class="btn" id="btn-clean-snaps">Nettoyer les snapshots orphelins</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Dialogues (Logs & Planification Timer) -->
+  <dialog id="dlg-logs">
+    <div class="card-header">
+      <h2 id="dlg-logs-title">Journaux</h2>
+      <button type="button" class="btn btn-sm" id="dlg-logs-close">Fermer</button>
+    </div>
+    <pre id="dlg-logs-content" class="code-box"></pre>
+  </dialog>
+
+  <dialog id="dlg-timer">
+    <div class="card-header">
+      <h2 id="dlg-timer-title">Planifier la tâche (systemd timer)</h2>
+      <button type="button" class="btn btn-sm" id="dlg-timer-close">Fermer</button>
+    </div>
+    <form id="timer-form">
+      <input type="hidden" id="tmr-job-id">
+      <div class="form-grid">
+        <div class="field field-full">
+          <label for="tmr-preset">Préréglage</label>
+          <select id="tmr-preset"></select>
+        </div>
+        <div class="field">
+          <label for="tmr-calendar">Expression systemd OnCalendar=</label>
+          <input type="text" id="tmr-calendar" value="*-*-* 01:00:00" required>
+        </div>
+        <div class="field">
+          <label for="tmr-delay">Délai aléatoire (RandomizedDelaySec)</label>
+          <input type="text" id="tmr-delay" value="5m">
+        </div>
+      </div>
+      <div class="checkbox-row">
+        <label><input type="checkbox" id="tmr-enabled" checked> Activer le timer immédiatement</label>
+      </div>
+      <div class="btn-group">
+        <button type="submit" class="btn btn-primary">Enregistrer le timer</button>
+        <button type="button" class="btn btn-danger" id="btn-timer-remove">Supprimer le timer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

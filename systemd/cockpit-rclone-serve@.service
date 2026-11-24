@@ -1,0 +1,15 @@
+[Unit]
+Description=Serveur rclone serve cockpit-rclone (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/lib/cockpit-rclone/rclone-job-runner.py serve %i
+Restart=on-failure
+RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=15s
+
+[Install]
+WantedBy=multi-user.target
