@@ -12,6 +12,7 @@ Utilisé par `cockpit-rclone` :
 """
 from __future__ import annotations
 
+import secrets
 import configparser
 import html
 import http.server
@@ -100,6 +101,7 @@ def exchange_and_store_oauth_code(
     state_received: str | None = None,
     *,
     exchange_fn=exchange_oauth_code_with_google,
+    allow_missing_state: bool = False,
 ) -> dict[str, Any]:
     """Finalise une session OAuth : vérifie state, obtient le token et met à jour rclone.conf."""
     if not session_path.is_file():
@@ -115,7 +117,14 @@ def exchange_and_store_oauth_code(
         raise ValueError(session["error"])
 
     expected_state = str(session.get("state") or "")
-    if state_received is not None and expected_state and state_received != expected_state:
+    # R4 (vérification Claude 2026-11-24) : sur l'écouteur réseau, state est OBLIGATOIRE
+    # (protection contre l'injection d'un code par une page tierce). Seul un code brut collé
+    # à la main dans Cockpit par un administrateur connecté peut arriver sans state.
+    if state_received is None and not allow_missing_state:
+        raise ValueError("Paramètre state OAuth absent : rappel refusé.")
+    if state_received is not None and (
+        not expected_state or not secrets.compare_digest(str(state_received), expected_state)
+    ):
         raise ValueError("Paramètre state OAuth incohérent (session différente ou requête périmée).")
 
     token_resp = exchange_fn(

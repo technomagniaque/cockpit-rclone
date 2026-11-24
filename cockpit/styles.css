@@ -280,3 +280,9 @@ dialog {
   max-height: 88vh;
 }
 dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+
+.hint {
+  font-size: 0.85em;
+  opacity: 0.8;
+  margin: 0.25rem 0 0.5rem;
+}

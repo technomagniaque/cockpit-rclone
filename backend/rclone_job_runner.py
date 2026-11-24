@@ -98,8 +98,18 @@ def _destroy_zfs_snapshot(full_snap: str) -> None:
               file=sys.stderr)
 
 
-def _run_subprocess(argv: list[str]) -> int:
-    proc = subprocess.Popen(argv)
+def _run_subprocess(
+    argv: list[str],
+    *,
+    user: int | None = None,
+    group: int | None = None,
+    env: dict[str, str] | None = None,
+) -> int:
+    """Lance rclone ; avec user/group, perd les droits root avant exec (groupes annexes vidés)."""
+    if user is not None:
+        proc = subprocess.Popen(argv, user=user, group=group, extra_groups=[], env=env, umask=0o077)
+    else:
+        proc = subprocess.Popen(argv, env=env)
 
     def _forward(signum: int, _frame: Any) -> None:
         if proc.poll() is None:
@@ -221,6 +231,38 @@ def run_mount(mount_id: str) -> int:
     return _run_subprocess(argv)
 
 
+def _prepare_serve_runtime(sid: str, config_path: str, run_as: str) -> tuple[str, int, int]:
+    """Prépare /run/cockpit-rclone/serve-<id>/ (0700, propriétaire = utilisateur d'exécution)
+    avec une copie 0600 de rclone.conf : rclone serve tourne SANS les droits root et ne peut
+    donc pas lire /etc/cockpit-rclone ni /root. Rend (chemin de la copie, uid, gid).
+    Limite connue : un jeton OAuth rafraîchi par serve n'est pas réécrit dans le vrai
+    rclone.conf (la copie est refaite à chaque démarrage)."""
+    import pwd
+
+    try:
+        pw = pwd.getpwnam(run_as)
+    except KeyError:
+        raise RuntimeError(f"Utilisateur d'exécution introuvable : {run_as} (créé par le paquet : cockpit-rclone)")
+    if pw.pw_uid == 0:
+        raise RuntimeError("rclone serve ne tourne jamais en root")
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(RUN_DIR, 0o711)  # traversable, non listable
+    sdir = RUN_DIR / f"serve-{sid}"
+    sdir.mkdir(mode=0o700, exist_ok=True)
+    os.chown(sdir, pw.pw_uid, pw.pw_gid)
+    os.chmod(sdir, 0o700)
+    conf = sdir / "rclone.conf"
+    tmp = sdir / f".rclone.conf.{os.getpid()}"
+    src = Path(config_path)
+    data = src.read_bytes() if src.exists() else b""
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    os.chown(tmp, pw.pw_uid, pw.pw_gid)
+    os.replace(tmp, conf)
+    return str(conf), pw.pw_uid, pw.pw_gid
+
+
 def run_serve(serve_id: str) -> int:
     sid = core.validate_job_id(serve_id)
     state = _load_state()
@@ -228,9 +270,24 @@ def run_serve(serve_id: str) -> int:
     if not serve:
         print(f"cockpit-rclone: serveur introuvable : {sid}", file=sys.stderr)
         return 2
+    run_as = core.validate_run_as(str(serve.get("run_as") or ""))
+    roots = core.serve_allowed_roots(_list_zfs_datasets(), state.get("serve_allowed_roots") or [])
     config_path = str(state.get("config_path") or DEFAULT_RCLONE_CONF)
-    argv = core.build_serve_argv(serve, config_path=config_path)
-    return _run_subprocess(argv)
+    try:
+        # Vérifie AVANT de préparer quoi que ce soit (adresse, authentification, dossier servi)
+        core.build_serve_argv(serve, config_path=config_path, allowed_roots=roots)
+        conf_copy, uid, gid = _prepare_serve_runtime(sid, config_path, run_as)
+        argv = core.build_serve_argv(serve, config_path=conf_copy, allowed_roots=roots)
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(f"cockpit-rclone: serveur {sid} refusé : {exc}", file=sys.stderr)
+        return 2
+    env = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "HOME": str(RUN_DIR / f"serve-{sid}"),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        **core.serve_env(serve),
+    }
+    return _run_subprocess(argv, user=uid, group=gid, env=env)
 
 
 def main(argv: list[str] | None = None) -> int:

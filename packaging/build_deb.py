@@ -21,7 +21,7 @@ Section: admin
 Priority: optional
 Architecture: all
 Maintainer: Etienne <technomagniaque@users.noreply.github.com>
-Depends: cockpit-bridge, python3 (>= 3.9), rclone, fuse3
+Depends: cockpit-bridge, python3 (>= 3.9), rclone, fuse3, adduser
 Suggests: zfsutils-linux
 Description: Extension Cockpit de gestion rclone optimisée NAS ZFS et Google Drive
  Interface Cockpit complète pour configurer les remotes rclone (assistant
@@ -34,6 +34,10 @@ Description: Extension Cockpit de gestion rclone optimisée NAS ZFS et Google Dr
 POSTINST = """#!/bin/sh
 set -e
 install -d -m 0700 /etc/cockpit-rclone
+# Utilisateur sans privilèges pour rclone serve (jamais root ; vérification Claude 2026-11-24)
+if ! getent passwd cockpit-rclone >/dev/null 2>&1; then
+    adduser --system --group --no-create-home --home /nonexistent --shell /usr/sbin/nologin cockpit-rclone >/dev/null
+fi
 install -d -m 0755 /var/cache/cockpit-rclone
 if [ -f /etc/fuse.conf ] && ! grep -Eq '^[[:space:]]*user_allow_other[[:space:]]*$' /etc/fuse.conf; then
     if grep -Eq '^[[:space:]]*#[[:space:]]*user_allow_other[[:space:]]*$' /etc/fuse.conf; then

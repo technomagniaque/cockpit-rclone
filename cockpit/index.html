@@ -511,16 +511,22 @@
                 <input type="text" id="srv-addr" value="127.0.0.1:8088" required>
               </div>
               <div class="field">
-                <label for="srv-user">Utilisateur (optionnel)</label>
+                <label for="srv-user">Utilisateur (obligatoire hors 127.0.0.1)</label>
                 <input type="text" id="srv-user">
               </div>
               <div class="field">
-                <label for="srv-pass">Mot de passe (optionnel)</label>
+                <label for="srv-pass">Mot de passe (obligatoire hors 127.0.0.1)</label>
                 <input type="password" id="srv-pass">
               </div>
+              <div class="field">
+                <label for="srv-run-as">Exécuter en tant que (jamais root)</label>
+                <input type="text" id="srv-run-as" value="cockpit-rclone">
+              </div>
             </div>
+            <p class="hint">Un dossier local n'est servable que s'il est sur un dataset ZFS monté. Le serveur ne lit que les fichiers que cet utilisateur peut lire.</p>
             <div class="checkbox-row">
               <label><input type="checkbox" id="srv-ro" checked> Lecture seule (--read-only)</label>
+              <label><input type="checkbox" id="srv-dlna-ack"> DLNA sur le réseau sans authentification (lecture seule imposée)</label>
             </div>
             <button type="submit" class="btn btn-primary">Enregistrer le serveur</button>
           </form>

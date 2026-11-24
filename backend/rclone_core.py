@@ -639,22 +639,116 @@ def build_mount_argv(mount: Mapping[str, Any], *, config_path: str) -> list[str]
     return argv
 
 
-def build_serve_argv(serve: Mapping[str, Any], *, config_path: str) -> list[str]:
-    """Construit la commande `rclone serve <proto>`."""
+# Dossiers système jamais servables, même s'ils sont sous un dataset autorisé.
+DENIED_SERVE_ROOTS = (
+    "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/proc",
+    "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr", "/var",
+)
+LOOPBACK_HOSTS = ("localhost", "::1", "[::1]")
+DEFAULT_SERVE_USER = "cockpit-rclone"
+SERVE_RUN_AS_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+
+
+def serve_allowed_roots(datasets: Sequence[Mapping[str, str]], extra: Sequence[str] = ()) -> list[str]:
+    """Racines locales servables : points de montage des datasets ZFS (+ liste explicite),
+    sans jamais un dossier système (/, /etc, /root…)."""
+    roots: list[str] = []
+    for mp in [str(d.get("mountpoint", "")) for d in datasets] + [str(x) for x in extra]:
+        mp = os.path.normpath(mp) if mp else ""
+        if mp.startswith("/") and mp not in DENIED_SERVE_ROOTS and mp not in roots:
+            roots.append(mp)
+    return roots
+
+
+def addr_is_loopback(addr: str) -> bool:
+    """Vrai si l'adresse d'écoute n'est joignable que depuis la machine elle-même."""
+    host = addr.rsplit(":", 1)[0] if ":" in addr else addr
+    host = host.strip().lower()
+    if not host:  # ":8080" = toutes les interfaces
+        return False
+    if host in LOOPBACK_HOSTS:
+        return True
+    return host.startswith("127.")
+
+
+def validate_serve_source(remote_path: str, allowed_roots: Sequence[str]) -> str:
+    """Un serve publie soit un remote configuré (« nom:chemin »), soit un dossier local situé
+    sous une racine autorisée (dataset ZFS). Refuse « / », /etc, /root, les remotes à la volée
+    (« :local:/ », « :sftp,host=…: ») et les chemins relatifs."""
+    val = validate_path(remote_path, "remote_path")
+    if val.startswith(":"):
+        raise ValueError("Les remotes à la volée (« :type: ») sont interdits pour un serveur")
+    m = re.match(r"^([A-Za-z0-9._-]{1,64}):", val)
+    if m and not val.startswith("/"):
+        return val  # remote configuré dans rclone.conf
+    if not val.startswith("/"):
+        raise ValueError("Chemin local relatif interdit : donnez un chemin absolu ou un remote « nom: »")
+    # realpath : un lien symbolique placé dans le dataset ne doit pas mener hors de lui
+    real = os.path.realpath(val)
+    if real not in DENIED_SERVE_ROOTS:
+        for root in allowed_roots:
+            r = os.path.realpath(root)
+            if r in DENIED_SERVE_ROOTS:
+                continue
+            if real == r or real.startswith(r + "/"):
+                return val
+    raise ValueError(
+        f"Dossier local non autorisé pour un serveur : {val!r}. "
+        f"Seuls les datasets ZFS montés sont servables : {', '.join(allowed_roots) or 'aucun trouvé'}"
+    )
+
+
+def validate_run_as(user: str) -> str:
+    val = (user or DEFAULT_SERVE_USER).strip()
+    if not SERVE_RUN_AS_RE.fullmatch(val) or val == "root":
+        raise ValueError(f"Utilisateur d'exécution invalide : {val!r} (jamais root)")
+    return val
+
+
+def build_serve_argv(
+    serve: Mapping[str, Any],
+    *,
+    config_path: str,
+    allowed_roots: Sequence[str] = (),
+) -> list[str]:
+    """Construit la commande `rclone serve <proto>`.
+
+    Sécurité (vérification Claude du 2026-11-24, R1/R2) :
+      - lecture seule par défaut, toujours pour DLNA (protocole sans authentification) ;
+      - hors boucle locale : utilisateur ET mot de passe obligatoires (DLNA : accord explicite) ;
+      - le mot de passe n'est JAMAIS dans la ligne de commande (/proc/*/cmdline lisible par
+        tous) : il passe par l'environnement, voir serve_env() ;
+      - dossier local seulement sous un dataset ZFS autorisé.
+    """
     proto = str(serve.get("protocol") or "webdav").lower()
     if proto not in ALLOWED_SERVE_PROTOCOLS:
         raise ValueError(f"Protocole serve invalide : {proto!r}")
-    remote_path = validate_path(str(serve.get("remote_path", "")), "remote_path")
+    remote_path = validate_serve_source(str(serve.get("remote_path", "")), allowed_roots)
     addr = str(serve.get("addr") or "127.0.0.1:8080").strip()
     if not SAFE_ADDR_RE.fullmatch(addr):
         raise ValueError(f"Adresse d'écoute invalide : {addr!r}")
+    validate_run_as(str(serve.get("run_as") or ""))
+
+    lan = not addr_is_loopback(addr)
+    has_auth = bool(serve.get("user")) and bool(serve.get("pass"))
+    if lan and proto == "dlna" and not serve.get("dlna_lan_ack"):
+        raise ValueError("DLNA n'a pas d'authentification : sur le réseau, cochez l'accord explicite (lecture seule imposée)")
+    if lan and proto != "dlna" and not has_auth:
+        raise ValueError(f"Adresse {addr} joignable depuis le réseau : utilisateur et mot de passe obligatoires")
 
     argv = ["rclone", "serve", proto, remote_path, "--config", config_path, "--addr", addr]
-    if serve.get("read_only"):
+    if proto == "dlna" or serve.get("read_only", True):
         argv.append("--read-only")
-    if serve.get("user") and serve.get("pass") and proto != "dlna":
-        argv += ["--user", str(serve["user"]), "--pass", str(serve["pass"])]
     return argv
+
+
+def serve_env(serve: Mapping[str, Any]) -> dict[str, str]:
+    """Identifiants du serveur, passés par l'environnement (RCLONE_USER / RCLONE_PASS) et non
+    par argv : seul le propriétaire du processus et root peuvent lire /proc/<pid>/environ."""
+    proto = str(serve.get("protocol") or "webdav").lower()
+    if proto == "dlna" or not (serve.get("user") and serve.get("pass")):
+        return {}
+    return {"RCLONE_USER": str(serve["user"]), "RCLONE_PASS": str(serve["pass"])}
 
 
 def render_timer_unit(job_id: str, schedule: str, randomized_delay: str = "5m") -> str:

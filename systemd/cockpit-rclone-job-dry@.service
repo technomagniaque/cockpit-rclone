@@ -4,6 +4,12 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# Durcissement sans espace de noms de montage (vérification Claude 2026-11-24, R3) :
+# les snapshots ZFS (.zfs/snapshot) et les montages FUSE doivent rester visibles de l'hôte.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
 Type=oneshot
 ExecStart=/usr/bin/python3 /usr/lib/cockpit-rclone/rclone-job-runner.py job-dry %i
 KillMode=mixed

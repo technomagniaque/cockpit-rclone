@@ -581,7 +581,9 @@ def cmd_gdrive_oauth_finish(payload: dict[str, Any]) -> dict[str, Any]:
     callback_input = str(payload.get("callback_input") or payload.get("code") or "")
     code, state_rx = core.parse_oauth_callback_input(callback_input)
     session_path = _oauth_session_path(session_id)
-    return oauth_listener.exchange_and_store_oauth_code(session_path, code, state_rx)
+    # Code brut collé à la main par un administrateur connecté à Cockpit : state peut manquer.
+    # Si l'URL complète est collée, son state est vérifié.
+    return oauth_listener.exchange_and_store_oauth_code(session_path, code, state_rx, allow_missing_state=True)
 
 
 def cmd_browse(payload: dict[str, Any]) -> dict[str, Any]:
@@ -821,8 +823,11 @@ def cmd_serve_save(payload: dict[str, Any]) -> dict[str, Any]:
         "user": str(payload.get("user") or "").strip(),
         "pass": raw_pass,
         "read_only": bool(payload.get("read_only", True)),
+        "run_as": core.validate_run_as(str(payload.get("run_as") or "")),
+        "dlna_lan_ack": bool(payload.get("dlna_lan_ack", False)),
     }
-    core.build_serve_argv(serve, config_path=str(_config_path(state)))
+    roots = core.serve_allowed_roots(_zfs_datasets(), state.get("serve_allowed_roots") or [])
+    core.build_serve_argv(serve, config_path=str(_config_path(state)), allowed_roots=roots)
     state["serves"][sid] = serve
     _save_state(state)
     masked = dict(serve)

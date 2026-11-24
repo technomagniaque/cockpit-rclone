@@ -947,6 +947,8 @@ function bindEvents() {
       user: $("srv-user").value.trim(),
       pass: $("srv-pass").value,
       read_only: $("srv-ro").checked,
+      run_as: $("srv-run-as").value.trim() || "cockpit-rclone",
+      dlna_lan_ack: $("srv-dlna-ack").checked,
     };
     const res = await runAction(() => callCtl(["serve-save"], payload), `Serveur « ${payload.id} » enregistré.`);
     if (res) {
