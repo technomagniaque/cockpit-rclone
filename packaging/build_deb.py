@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 REPO = Path(__file__).resolve().parent.parent
 
 CONTROL_TPL = """Package: cockpit-rclone
@@ -94,6 +94,7 @@ def build_deb(out_dir: Path, version: str = VERSION) -> Path:
 
         # Backend Python
         _copy(REPO / "backend/rclone_core.py", root / "usr/lib/cockpit-rclone/rclone_core.py", 0o644)
+        _copy(REPO / "backend/rclone_oauth_listener.py", root / "usr/lib/cockpit-rclone/rclone_oauth_listener.py", 0o755)
         _copy(REPO / "backend/rclone_ctl.py", root / "usr/lib/cockpit-rclone/rclone-ctl.py", 0o755)
         _copy(REPO / "backend/rclone_job_runner.py", root / "usr/lib/cockpit-rclone/rclone-job-runner.py", 0o755)
 

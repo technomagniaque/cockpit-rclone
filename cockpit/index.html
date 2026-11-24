@@ -163,13 +163,33 @@
                 <textarea id="rem-oauth-json" placeholder='{"clientId":"...","clientSecret":"..."} ou {"installed":{...}}'></textarea>
               </div>
               <div class="field field-full">
-                <div class="btn-group" style="margin-bottom: 6px;">
-                  <button type="button" class="btn btn-sm" id="btn-auth-hint">Afficher la commande rclone authorize (à lancer sur Z640)</button>
+                <div class="btn-group" style="margin-bottom: 8px;">
+                  <button type="button" class="btn btn-primary" id="btn-gdrive-oauth-login">
+                    Ouvrir la vraie page de connexion Google (OAuth2)
+                  </button>
+                  <button type="button" class="btn btn-sm" id="btn-auth-hint">Commande terminal rclone authorize (optionnel)</button>
+                </div>
+                <div id="oauth-flow-box" class="alert hidden" style="flex-direction: column; align-items: stretch; gap: 8px;">
+                  <div id="oauth-flow-status"></div>
+                  <div>
+                    <a id="oauth-direct-link" href="#" target="_blank" rel="noopener noreferrer" class="btn btn-sm">
+                      Rouvrir la page de connexion Google
+                    </a>
+                  </div>
+                  <div class="muted">
+                    <strong>Sur ce poste (localhost) :</strong> la connexion se termine automatiquement dès que vous cliquez « Autoriser » chez Google.<br>
+                    <strong>Sur un NAS distant (ex. 192.168.0.9) :</strong> après avoir cliqué « Autoriser », Google redirige l'onglet vers <code>http://127.0.0.1:53682/?state=…&amp;code=…</code> (page inaccessible sur votre PC : c'est normal). Copiez simplement cette adresse et collez-la ci-dessous :
+                  </div>
+                  <div class="btn-group">
+                    <input type="text" id="oauth-callback-input" style="flex: 1;" placeholder="Collez l'URL http://127.0.0.1:53682/?state=...&code=... (ou juste le code)">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-gdrive-oauth-finish">Finaliser la connexion</button>
+                    <button type="button" class="btn btn-sm" id="btn-gdrive-oauth-cancel">Fermer</button>
+                  </div>
                 </div>
                 <pre id="auth-hint-box" class="code-box hidden"></pre>
               </div>
               <div class="field field-full">
-                <label for="rem-gdrive-token">Token OAuth JSON obtenu via rclone authorize</label>
+                <label for="rem-gdrive-token">Ou coller un token OAuth JSON manuellement (optionnel)</label>
                 <textarea id="rem-gdrive-token" placeholder='{"access_token":"...","token_type":"Bearer","refresh_token":"...","expiry":"..."}'></textarea>
               </div>
             </div>

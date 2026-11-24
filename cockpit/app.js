@@ -19,6 +19,8 @@ const state = {
   overview: null,
   timerHandle: null,
   aboutCache: {},
+  oauthSession: null,
+  oauthPollHandle: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -239,6 +241,10 @@ function renderRemotes(ov) {
         className: r.has_own_client_id ? "badge badge-ok" : "badge badge-warn",
         text: r.has_own_client_id ? "Client ID OAuth perso OK" : "Client ID partagé (bridé)",
       }));
+      badges.push(" ", el("span", {
+        className: r.has_token ? "badge badge-ok" : "badge badge-danger",
+        text: r.has_token ? "Connecté Google" : "Token manquant",
+      }));
       if (r.options.team_drive) {
         badges.push(" ", el("span", { className: "badge", text: "Shared Drive" }));
       }
@@ -251,6 +257,17 @@ function renderRemotes(ov) {
       el("td", {}, badges.length ? badges : [el("span", { className: "muted", text: `${Object.keys(r.options || {}).length} option(s)` })]),
       el("td", {}, [
         el("div", { className: "btn-group" }, [
+          r.type === "drive"
+            ? el("button", {
+                type: "button",
+                className: r.has_token ? "btn btn-sm" : "btn btn-sm btn-primary",
+                text: r.has_token ? "Reconnecter Google" : "Connecter Google",
+                onClick: () => {
+                  populateRemoteForm(r);
+                  startGoogleOAuthFlow(r.name);
+                },
+              })
+            : null,
           el("button", { type: "button", className: "btn btn-sm", text: "Modifier", onClick: () => populateRemoteForm(r) }),
           el("button", {
             type: "button",
@@ -649,6 +666,112 @@ function updateMountProfileDesc() {
   $("mnt-profile-desc").textContent = info ? info.description : "";
 }
 
+function stopOAuthPolling() {
+  if (state.oauthPollHandle) {
+    clearInterval(state.oauthPollHandle);
+    state.oauthPollHandle = null;
+  }
+}
+
+function closeOAuthFlowBox() {
+  stopOAuthPolling();
+  state.oauthSession = null;
+  $("oauth-flow-box").classList.add("hidden");
+  $("oauth-callback-input").value = "";
+}
+
+async function startGoogleOAuthFlow(overrideRemoteName = "") {
+  const name = (overrideRemoteName || $("rem-name").value || "").trim();
+  if (!name) {
+    showBanner("warn", "Indiquez d'abord le nom du remote (ex. t1 ou gdrive) avant de lancer la connexion Google.");
+    $("rem-name").focus();
+    return;
+  }
+  $("rem-name").value = name;
+  $("rem-type").value = "drive";
+  toggleRemoteBoxes();
+
+  // Ouvre l'onglet synchroniquement dans le geste utilisateur pour éviter le blocage popup
+  const popup = window.open("about:blank", "_blank");
+  const payload = {
+    name,
+    scope: $("rem-gdrive-scope").value || "drive",
+    team_drive: $("rem-gdrive-team").value.trim(),
+    root_folder_id: $("rem-gdrive-root").value.trim(),
+    client_id: $("rem-gdrive-cid").value.trim(),
+    client_secret: $("rem-gdrive-csec").value.trim(),
+    use_oauth_file: $("rem-oauth-file").value,
+    oauth_json: $("rem-oauth-json").value.trim(),
+  };
+
+  const res = await runAction(() => callCtl(["gdrive-oauth-start"], payload));
+  if (!res || !res.auth_url) {
+    if (popup && !popup.closed) popup.close();
+    return;
+  }
+
+  state.oauthSession = { session_id: res.session_id, remote: res.remote };
+  $("oauth-direct-link").setAttribute("href", res.auth_url);
+  $("oauth-flow-status").textContent =
+    `Connexion Google ouverte pour « ${res.remote}: » (client ${res.client_id_preview}). ` +
+    "Validez l'accès dans l'onglet Google…";
+  $("oauth-flow-box").className = "alert alert-ok";
+  $("oauth-flow-box").classList.remove("hidden");
+  $("oauth-callback-input").value = "";
+
+  if (popup && !popup.closed) {
+    popup.location.href = res.auth_url;
+  } else {
+    showBanner("warn", "Votre navigateur a bloqué l'ouverture automatique : cliquez sur « Rouvrir la page de connexion Google » ci-dessous.");
+  }
+
+  stopOAuthPolling();
+  state.oauthPollHandle = setInterval(async () => {
+    if (!state.oauthSession) {
+      stopOAuthPolling();
+      return;
+    }
+    try {
+      const st = await callCtl(["gdrive-oauth-status", state.oauthSession.session_id]);
+      if (st.status === "completed") {
+        const rname = state.oauthSession.remote;
+        closeOAuthFlowBox();
+        showBanner("ok", `Remote « ${rname}: » connecté à Google Drive ! Le token OAuth a été enregistré dans rclone.conf.`);
+        await refreshOverview();
+      } else if (st.status === "error" || st.status === "expired") {
+        stopOAuthPolling();
+        $("oauth-flow-box").className = "alert alert-error";
+        $("oauth-flow-status").textContent = st.error || "Session OAuth expirée.";
+      }
+    } catch {
+      // ignore transient poll error
+    }
+  }, 2000);
+}
+
+async function finishGoogleOAuthFlow() {
+  if (!state.oauthSession) {
+    showBanner("warn", "Lancez d'abord « Ouvrir la vraie page de connexion Google ».");
+    return;
+  }
+  const callbackInput = $("oauth-callback-input").value.trim();
+  if (!callbackInput) {
+    showBanner("warn", "Collez l'URL http://127.0.0.1:53682/?state=...&code=... (ou le code seul).");
+    return;
+  }
+  const res = await runAction(
+    () => callCtl(["gdrive-oauth-finish"], {
+      session_id: state.oauthSession.session_id,
+      callback_input: callbackInput,
+    }),
+    `Remote « ${state.oauthSession.remote}: » connecté à Google Drive !`,
+  );
+  if (res && res.ok) {
+    closeOAuthFlowBox();
+    await refreshOverview();
+  }
+}
+
 function bindEvents() {
   $("banner-close").addEventListener("click", hideBanner);
   $("btn-refresh").addEventListener("click", () => refreshOverview());
@@ -661,9 +784,17 @@ function bindEvents() {
   $("btn-new-remote").addEventListener("click", () => {
     $("remote-form").reset();
     $("remote-form-title").textContent = "Nouveau remote";
+    closeOAuthFlowBox();
     toggleRemoteBoxes();
   });
-  $("btn-reset-remote").addEventListener("click", () => $("remote-form").reset());
+  $("btn-reset-remote").addEventListener("click", () => {
+    $("remote-form").reset();
+    closeOAuthFlowBox();
+  });
+
+  $("btn-gdrive-oauth-login").addEventListener("click", () => startGoogleOAuthFlow());
+  $("btn-gdrive-oauth-finish").addEventListener("click", () => finishGoogleOAuthFlow());
+  $("btn-gdrive-oauth-cancel").addEventListener("click", closeOAuthFlowBox);
 
   $("btn-auth-hint").addEventListener("click", async () => {
     const res = await runAction(() => callCtl(["gdrive-auth-hint"], { oauth_path: $("rem-oauth-file").value }));

@@ -17,9 +17,11 @@ import json
 import os
 import pwd
 import re
+import secrets
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -30,6 +32,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import rclone_core as core  # noqa: E402
+import rclone_oauth_listener as oauth_listener  # noqa: E402
 
 ETC_DIR = Path(os.environ.get("COCKPIT_RCLONE_ETC", "/etc/cockpit-rclone"))
 RUN_DIR = Path(os.environ.get("COCKPIT_RCLONE_RUN", "/run/cockpit-rclone"))
@@ -425,6 +428,162 @@ def cmd_gdrive_auth_hint(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "command": cmd}
 
 
+def _resolve_gdrive_client_creds(
+    payload: dict[str, Any],
+    existing: dict[str, str],
+) -> tuple[str, str]:
+    """Résout (client_id, client_secret) sans jamais exposer le secret au navigateur."""
+    oauth_path = str(payload.get("use_oauth_file") or "").strip()
+    if oauth_path:
+        allowed = {item["path"] for item in _detect_google_oauth_files()}
+        if oauth_path not in allowed:
+            raise ValueError("Chemin OAuth non autorisé (doit être un fichier détecté)")
+        return core.parse_google_oauth_json(Path(oauth_path).read_text(encoding="utf-8"))
+    if payload.get("oauth_json"):
+        return core.parse_google_oauth_json(str(payload["oauth_json"]))
+
+    cid = str(payload.get("client_id") or existing.get("client_id") or "").strip()
+    csec_in = str(payload.get("client_secret") or "").strip()
+    if csec_in == core.MASKED_VALUE:
+        csec_in = ""
+    csec = csec_in or str(existing.get("client_secret") or "").strip()
+
+    if cid and csec:
+        return cid, csec
+
+    # Repli automatique sur la clé Google déjà présente sur la machine (ex. mygdoc)
+    detected = _detect_google_oauth_files()
+    if detected:
+        return core.parse_google_oauth_json(Path(detected[0]["path"]).read_text(encoding="utf-8"))
+
+    raise ValueError(
+        "Aucun client_id / client_secret Google OAuth trouvé. "
+        "Sélectionnez votre fichier OAuth Google détecté ou saisissez client_id + client_secret."
+    )
+
+
+def _oauth_session_path(session_id: str) -> Path:
+    sid = core.validate_session_id(session_id)
+    return RUN_DIR / f"oauth-{sid}.json"
+
+
+def cmd_gdrive_oauth_start(payload: dict[str, Any]) -> dict[str, Any]:
+    """Démarre une session OAuth2 Google (PKCE) et renvoie l'URL directe de connexion Google."""
+    state = _load_state()
+    cfg_path = _config_path(state)
+    remote_name = core.validate_remote_name(str(payload.get("name", "")))
+    sections = _read_raw_conf_sections(cfg_path)
+    existing = dict(sections.get(remote_name, {}))
+
+    cid, csec = _resolve_gdrive_client_creds(payload, existing)
+    scope = str(payload.get("scope") or existing.get("scope") or "drive").strip() or "drive"
+    team_drive = str(payload.get("team_drive") or existing.get("team_drive") or "").strip()
+    root_folder_id = str(payload.get("root_folder_id") or existing.get("root_folder_id") or "").strip()
+
+    # Sauvegarde préalable des paramètres non-token dans rclone.conf (client_id/secret/scope)
+    sec = dict(existing)
+    sec["type"] = "drive"
+    sec["client_id"] = cid
+    sec["client_secret"] = csec
+    sec["scope"] = scope
+    if team_drive:
+        sec["team_drive"] = team_drive
+    if root_folder_id:
+        sec["root_folder_id"] = root_folder_id
+    sections[remote_name] = sec
+    _atomic_write(cfg_path, core.dump_rclone_conf(sections), 0o600)
+
+    port = int(os.environ.get("COCKPIT_RCLONE_OAUTH_PORT", "53682"))
+    redirect_uri = f"http://127.0.0.1:{port}/"
+    session_id = secrets.token_urlsafe(18)
+    oauth_state = secrets.token_urlsafe(24)
+    verifier, challenge = core.generate_pkce_pair()
+
+    auth_url = core.build_gdrive_oauth_url(
+        client_id=cid,
+        state=oauth_state,
+        code_challenge=challenge,
+        scope=scope,
+        redirect_uri=redirect_uri,
+    )
+
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(RUN_DIR, 0o700)
+    session_path = _oauth_session_path(session_id)
+    session_data = {
+        "session_id": session_id,
+        "remote": remote_name,
+        "config_path": str(cfg_path),
+        "client_id": cid,
+        "client_secret": csec,
+        "scope": scope,
+        "team_drive": team_drive,
+        "root_folder_id": root_folder_id,
+        "state": oauth_state,
+        "code_verifier": verifier,
+        "redirect_uri": redirect_uri,
+        "status": "pending",
+        "error": "",
+        "created_at": time.time(),
+        "expires_at": time.time() + 300.0,
+    }
+    _atomic_write(session_path, json.dumps(session_data), 0o600)
+
+    listener_started = False
+    if os.environ.get("COCKPIT_RCLONE_NO_OAUTH_LISTENER") != "1":
+        listener_script = HERE / "rclone_oauth_listener.py"
+        if listener_script.is_file():
+            try:
+                subprocess.Popen(
+                    [sys.executable, str(listener_script), str(session_path), str(port)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+                listener_started = True
+            except OSError:
+                listener_started = False
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "remote": remote_name,
+        "auth_url": auth_url,
+        "redirect_uri": redirect_uri,
+        "listener_started": listener_started,
+        "client_id_preview": core.preview_client_id(cid),
+    }
+
+
+def cmd_gdrive_oauth_status(session_id: str) -> dict[str, Any]:
+    """Renvoie l'état d'une session OAuth sans jamais exposer aucun secret."""
+    session_path = _oauth_session_path(session_id)
+    if not session_path.is_file():
+        return {"ok": True, "status": "expired", "error": "Session OAuth introuvable ou expirée."}
+    data = json.loads(session_path.read_text(encoding="utf-8"))
+    status = str(data.get("status") or "pending")
+    if status == "pending" and time.time() > float(data.get("expires_at") or 0):
+        status = "expired"
+    return {
+        "ok": True,
+        "session_id": data.get("session_id"),
+        "remote": data.get("remote"),
+        "status": status,
+        "error": str(data.get("error") or ""),
+    }
+
+
+def cmd_gdrive_oauth_finish(payload: dict[str, Any]) -> dict[str, Any]:
+    """Finalise une connexion OAuth à partir de l'URL de redirection collée ou du code brut."""
+    session_id = core.validate_session_id(str(payload.get("session_id", "")))
+    callback_input = str(payload.get("callback_input") or payload.get("code") or "")
+    code, state_rx = core.parse_oauth_callback_input(callback_input)
+    session_path = _oauth_session_path(session_id)
+    return oauth_listener.exchange_and_store_oauth_code(session_path, code, state_rx)
+
+
 def cmd_browse(payload: dict[str, Any]) -> dict[str, Any]:
     target = core.validate_path(str(payload.get("target", "")), "target")
     state = _load_state()
@@ -726,6 +885,12 @@ def dispatch(argv: list[str]) -> dict[str, Any]:
         return cmd_remote_cleanup(argv[1])
     if cmd == "gdrive-auth-hint":
         return cmd_gdrive_auth_hint(_read_stdin_json())
+    if cmd == "gdrive-oauth-start":
+        return cmd_gdrive_oauth_start(_read_stdin_json())
+    if cmd == "gdrive-oauth-status":
+        return cmd_gdrive_oauth_status(argv[1])
+    if cmd == "gdrive-oauth-finish":
+        return cmd_gdrive_oauth_finish(_read_stdin_json())
     if cmd == "browse":
         return cmd_browse(_read_stdin_json())
     if cmd == "size":

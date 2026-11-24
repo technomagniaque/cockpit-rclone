@@ -10,10 +10,16 @@ Regroupe :
 """
 from __future__ import annotations
 
+import base64
 import configparser
+import datetime
+import hashlib
 import io
+import json
 import os
 import re
+import secrets
+import urllib.parse
 from typing import Any, Mapping, Sequence
 
 REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -356,6 +362,7 @@ def parse_rclone_conf(text: str, mask_secrets: bool = True) -> list[dict[str, An
             "options": opts,
             "has_secrets": secret_fields,
             "has_own_client_id": bool(section.get("client_id")) if rtype == "drive" else None,
+            "has_token": bool(section.get("token")) if rtype == "drive" else None,
         })
     return remotes
 
@@ -666,3 +673,114 @@ def render_timer_unit(job_id: str, schedule: str, randomized_delay: str = "5m") 
         "[Install]\n"
         "WantedBy=timers.target\n"
     )
+
+
+# ------------------------------------------------------------------ Google Drive OAuth2 PKCE
+
+GOOGLE_OAUTH_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+DEFAULT_OAUTH_REDIRECT_URI = "http://127.0.0.1:53682/"
+
+GDRIVE_SCOPE_URLS: dict[str, str] = {
+    "drive": "https://www.googleapis.com/auth/drive",
+    "drive.readonly": "https://www.googleapis.com/auth/drive.readonly",
+    "drive.file": "https://www.googleapis.com/auth/drive.file",
+    "drive.appfolder": "https://www.googleapis.com/auth/drive.appdata",
+    "drive.metadata.readonly": "https://www.googleapis.com/auth/drive.metadata.readonly",
+}
+
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+def validate_session_id(session_id: str) -> str:
+    val = (session_id or "").strip()
+    if not SESSION_ID_RE.fullmatch(val):
+        raise ValueError("Identifiant de session OAuth invalide")
+    return val
+
+
+def resolve_gdrive_scope_url(scope: str) -> str:
+    raw = (scope or "drive").strip()
+    if raw.startswith("https://"):
+        return raw
+    return GDRIVE_SCOPE_URLS.get(raw, GDRIVE_SCOPE_URLS["drive"])
+
+
+def generate_pkce_pair() -> tuple[str, str]:
+    """Génère (code_verifier, code_challenge S256) conforme RFC 7636."""
+    verifier = secrets.token_urlsafe(48)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
+
+
+def build_gdrive_oauth_url(
+    *,
+    client_id: str,
+    state: str,
+    code_challenge: str,
+    scope: str = "drive",
+    redirect_uri: str = DEFAULT_OAUTH_REDIRECT_URI,
+) -> str:
+    """Construit l'URL officielle Google OAuth2 (page de connexion Google)."""
+    cid = (client_id or "").strip()
+    if not cid:
+        raise ValueError("client_id Google OAuth manquant")
+    params = {
+        "client_id": cid,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": resolve_gdrive_scope_url(scope),
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+    }
+    return f"{GOOGLE_OAUTH_AUTH_URL}?{urllib.parse.urlencode(params)}"
+
+
+def parse_oauth_callback_input(raw_input: str) -> tuple[str, str | None]:
+    """Extrait (code, state_optionnel) depuis une URL de redirection complète ou un code brut."""
+    text = (raw_input or "").strip()
+    if not text:
+        raise ValueError("Collez l'URL de redirection (http://127.0.0.1:53682/?...) ou le code OAuth Google")
+    if text.startswith("http://") or text.startswith("https://") or "code=" in text:
+        parsed = urllib.parse.urlparse(text if "://" in text else f"http://localhost/?{text.lstrip('?')}")
+        qs = urllib.parse.parse_qs(parsed.query)
+        if qs.get("error"):
+            err = qs["error"][0]
+            desc = (qs.get("error_description") or [""])[0]
+            raise ValueError(f"Autorisation refusée par Google : {err}" + (f" ({desc})" if desc else ""))
+        codes = qs.get("code")
+        if not codes or not codes[0].strip():
+            raise ValueError("Aucun paramètre 'code=' trouvé dans l'URL collée")
+        states = qs.get("state")
+        return codes[0].strip(), (states[0].strip() if states and states[0].strip() else None)
+    if any(ch.isspace() for ch in text):
+        raise ValueError("Code OAuth invalide (contient des espaces)")
+    return text, None
+
+
+def format_rclone_oauth_token(
+    token_resp: Mapping[str, Any],
+    *,
+    now: datetime.datetime | None = None,
+) -> str:
+    """Convertit la réponse JSON de https://oauth2.googleapis.com/token au format token rclone."""
+    access = str(token_resp.get("access_token") or "").strip()
+    if not access:
+        raise ValueError("Réponse Google OAuth sans access_token")
+    token_type = str(token_resp.get("token_type") or "Bearer").strip() or "Bearer"
+    refresh = str(token_resp.get("refresh_token") or "").strip()
+    expires_in = int(token_resp.get("expires_in") or 3599)
+    base_now = now or datetime.datetime.now(datetime.timezone.utc)
+    expiry = (base_now + datetime.timedelta(seconds=max(60, expires_in))).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    out: dict[str, Any] = {
+        "access_token": access,
+        "token_type": token_type,
+        "expiry": expiry,
+    }
+    if refresh:
+        out["refresh_token"] = refresh
+    return json.dumps(out, separators=(",", ":"))
