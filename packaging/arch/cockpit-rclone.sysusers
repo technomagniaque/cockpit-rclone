@@ -1,0 +1,2 @@
+# Utilisateur système sans privilèges pour rclone serve (jamais root)
+u cockpit-rclone - "Unprivileged user for cockpit-rclone serve" /nonexistent /usr/bin/nologin

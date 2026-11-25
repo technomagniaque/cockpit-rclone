@@ -3,5 +3,6 @@ __pycache__/
 *.pyo
 dist/
 *.deb
+*.pkg.tar.*
 .pytest_cache/
 node_modules/

@@ -1,0 +1,2 @@
+d /etc/cockpit-rclone 0700 root root -
+d /var/cache/cockpit-rclone 0755 root root -

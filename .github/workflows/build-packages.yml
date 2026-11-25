@@ -1,9 +1,10 @@
-name: Build & Release (.deb Debian 13)
+name: Build & Release (Debian 13 & Arch Linux)
 
 on:
   push:
     branches:
       - main
+      - feat/arch-linux-package
     tags:
       - 'v*'
   pull_request:
@@ -36,10 +37,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Vérification syntaxique Python & JS
+      - name: Vérification syntaxique Python, JS & Shell
         run: |
-          python3 -B -m py_compile backend/*.py packaging/build_deb.py
+          python3 -B -m py_compile backend/*.py packaging/build_deb.py packaging/build_arch.py
           node --check cockpit/api.js cockpit/profiles.js cockpit/app.js
+          sh -n packaging/arch/cockpit-rclone.install
 
       - name: Tests unitaires Python
         run: python3 -m unittest discover -s tests -v
@@ -52,8 +54,9 @@ jobs:
         run: |
           TAG_VER="${GITHUB_REF_NAME#v}"
           DEB_VER="$(python3 -c 'import importlib.util; s=importlib.util.spec_from_file_location("b","packaging/build_deb.py"); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.VERSION)')"
-          if [[ "$TAG_VER" != "$DEB_VER" ]]; then
-            echo "::error::Le tag ($TAG_VER) ne correspond pas à packaging/build_deb.py ($DEB_VER)"
+          ARCH_VER="$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD | head -n1)"
+          if [[ "$TAG_VER" != "$DEB_VER" || "$TAG_VER" != "$ARCH_VER" ]]; then
+            echo "::error::Version incohérente : tag=$TAG_VER deb=$DEB_VER arch=$ARCH_VER"
             exit 1
           fi
           echo "Version cohérente : $TAG_VER"
@@ -133,10 +136,89 @@ jobs:
             dist/VERSION.txt
           if-no-files-found: error
 
+  build-archlinux:
+    name: Build & Vérification .pkg.tar.zst (Arch Linux)
+    needs: tests
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+      options: --user root
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Installer les outils de build Arch Linux
+        run: |
+          pacman -Syu --noconfirm --needed python namcap zstd
+          id -u builder >/dev/null 2>&1 || useradd -m builder
+
+      - name: Tests unitaires Python sous Arch Linux
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Construire le paquet Arch Linux
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${INPUT_VERSION}" ]]; then
+            VERSION="${INPUT_VERSION}"
+          else
+            VERSION="$(python3 -c 'import importlib.util; s=importlib.util.spec_from_file_location("b","packaging/build_arch.py"); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.VERSION)')"
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?$ ]]; then
+            echo "::error::Format de version invalide : $VERSION"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          mkdir -p dist
+          chown builder:builder dist
+          chmod -R a+rX "$GITHUB_WORKSPACE"
+
+          su -s /bin/bash builder -c "python3 '$GITHUB_WORKSPACE/packaging/build_arch.py' --out '$GITHUB_WORKSPACE/dist' --version '$VERSION'"
+
+          PKG="dist/cockpit-rclone-${VERSION}-1-any.pkg.tar.zst"
+          pacman -Qip "$PKG"
+          pacman -Qlp "$PKG"
+          namcap packaging/arch/PKGBUILD || true
+          namcap "$PKG" || true
+          (cd dist && sha256sum "cockpit-rclone-${VERSION}-1-any.pkg.tar.zst" > SHA256SUMS.arch.txt)
+          cat dist/SHA256SUMS.arch.txt
+
+      - name: Vérifier l'installation réelle sur Arch Linux
+        run: |
+          PKG="dist/cockpit-rclone-${VERSION}-1-any.pkg.tar.zst"
+          pacman -U --noconfirm "$PKG"
+          pacman -Q cockpit-rclone
+          getent passwd cockpit-rclone
+          test "$(stat -c %a /etc/cockpit-rclone)" = "700"
+          test -d /var/cache/cockpit-rclone
+          grep -Eq '^[[:space:]]*user_allow_other[[:space:]]*$' /etc/fuse.conf
+          test -f /usr/share/cockpit/rclone/manifest.json
+          test -x /usr/lib/cockpit-rclone/rclone-ctl.py
+          test -x /usr/lib/cockpit-rclone/rclone-job-runner.py
+          test -x /usr/lib/cockpit-rclone/rclone_oauth_listener.py
+          systemd-analyze verify \
+            /usr/lib/systemd/system/cockpit-rclone-job@.service \
+            /usr/lib/systemd/system/cockpit-rclone-job-dry@.service \
+            /usr/lib/systemd/system/cockpit-rclone-mount@.service \
+            /usr/lib/systemd/system/cockpit-rclone-serve@.service
+
+      - name: Publier l'artefact Arch Linux
+        uses: actions/upload-artifact@v4
+        with:
+          name: cockpit-rclone-archlinux-pkg
+          path: |
+            dist/cockpit-rclone-*.pkg.tar.zst
+            dist/SHA256SUMS.arch.txt
+          if-no-files-found: error
+
   release:
     name: Publier la Release GitHub
     needs:
       - build-debian13
+      - build-archlinux
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)
     runs-on: ubuntu-latest
     permissions:
@@ -165,7 +247,7 @@ jobs:
             VER="$(tr -d '[:space:]' < release-assets/VERSION.txt)"
             TAG="v${VER}"
           fi
-          ASSETS=(release-assets/*.deb release-assets/SHA256SUMS.txt)
+          ASSETS=(release-assets/*.deb release-assets/*.pkg.tar.zst release-assets/SHA256SUMS.txt)
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" "${ASSETS[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else

@@ -1,0 +1,21 @@
+_enable_user_allow_other() {
+    if [ -f /etc/fuse.conf ] && ! grep -Eq '^[[:space:]]*user_allow_other[[:space:]]*$' /etc/fuse.conf; then
+        if grep -Eq '^[[:space:]]*#[[:space:]]*user_allow_other[[:space:]]*$' /etc/fuse.conf; then
+            sed -i 's/^[[:space:]]*#[[:space:]]*user_allow_other[[:space:]]*$/user_allow_other/' /etc/fuse.conf
+        else
+            echo "user_allow_other" >> /etc/fuse.conf
+        fi
+    fi
+}
+
+post_install() {
+    install -d -m 0700 /etc/cockpit-rclone
+    install -d -m 0755 /var/cache/cockpit-rclone
+    _enable_user_allow_other
+}
+
+post_upgrade() {
+    install -d -m 0700 /etc/cockpit-rclone
+    install -d -m 0755 /var/cache/cockpit-rclone
+    _enable_user_allow_other
+}

@@ -144,7 +144,10 @@ def _fuse_allow_other_enabled() -> bool:
 def _local_users() -> list[dict[str, Any]]:
     users: list[dict[str, Any]] = []
     for entry in pwd.getpwall():
-        if entry.pw_uid == 0 or (1000 <= entry.pw_uid < 60000 and entry.pw_shell not in ("/usr/sbin/nologin", "/bin/false")):
+        if entry.pw_uid == 0 or (
+            1000 <= entry.pw_uid < 60000
+            and entry.pw_shell not in ("/usr/sbin/nologin", "/usr/bin/nologin", "/sbin/nologin", "/bin/false", "/usr/bin/false")
+        ):
             users.append({
                 "name": entry.pw_name,
                 "uid": entry.pw_uid,

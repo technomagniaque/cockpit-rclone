@@ -1,0 +1,53 @@
+# Maintainer: Etienne <technomagniaque@users.noreply.github.com>
+pkgname=cockpit-rclone
+pkgver=1.0.2
+pkgrel=1
+pkgdesc="Extension Cockpit de gestion rclone optimisée NAS ZFS et Google Drive"
+arch=('any')
+url="https://github.com/technomagniaque/cockpit-rclone"
+license=('GPL-3.0-or-later')
+depends=('cockpit' 'python' 'rclone' 'fuse3')
+optdepends=('zfs-utils: snapshots ZFS atomiques avant transfert et partage de datasets ZFS')
+install=cockpit-rclone.install
+source=(
+    'cockpit-rclone.sysusers'
+    'cockpit-rclone.tmpfiles'
+)
+sha256sums=(
+    'ea80d73b0f7fb63fa1253d58c0e8fc3c2166a610a9c9fc238748f0f6075645b0'
+    '68024e4aea5c3f0ef659167a33c8717bd65daf740a298bf9c3cc95c9bda51417'
+)
+
+package() {
+    local _src="${COCKPIT_RCLONE_SRC:-${startdir}/../..}"
+
+    # Frontend Cockpit
+    local _fname
+    for _fname in manifest.json index.html styles.css api.js profiles.js app.js; do
+        install -Dm644 "${_src}/cockpit/${_fname}" "${pkgdir}/usr/share/cockpit/rclone/${_fname}"
+    done
+
+    # Backend Python
+    install -Dm644 "${_src}/backend/rclone_core.py" "${pkgdir}/usr/lib/cockpit-rclone/rclone_core.py"
+    install -Dm755 "${_src}/backend/rclone_oauth_listener.py" "${pkgdir}/usr/lib/cockpit-rclone/rclone_oauth_listener.py"
+    install -Dm755 "${_src}/backend/rclone_ctl.py" "${pkgdir}/usr/lib/cockpit-rclone/rclone-ctl.py"
+    install -Dm755 "${_src}/backend/rclone_job_runner.py" "${pkgdir}/usr/lib/cockpit-rclone/rclone-job-runner.py"
+
+    # Unités systemd templates
+    local _unit
+    for _unit in \
+        cockpit-rclone-job@.service \
+        cockpit-rclone-job-dry@.service \
+        cockpit-rclone-mount@.service \
+        cockpit-rclone-serve@.service
+    do
+        install -Dm644 "${_src}/systemd/${_unit}" "${pkgdir}/usr/lib/systemd/system/${_unit}"
+    done
+
+    # Utilisateur système & dossiers (systemd-sysusers / systemd-tmpfiles)
+    install -Dm644 "${srcdir}/cockpit-rclone.sysusers" "${pkgdir}/usr/lib/sysusers.d/cockpit-rclone.conf"
+    install -Dm644 "${srcdir}/cockpit-rclone.tmpfiles" "${pkgdir}/usr/lib/tmpfiles.d/cockpit-rclone.conf"
+
+    # Documentation
+    install -Dm644 "${_src}/README.md" "${pkgdir}/usr/share/doc/cockpit-rclone/README.md"
+}
