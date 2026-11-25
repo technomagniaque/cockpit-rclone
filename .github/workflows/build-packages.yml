@@ -1,0 +1,159 @@
+name: Build & Release (.deb Debian 13)
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version du paquet (vide = VERSION dans packaging/build_deb.py)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests Python & Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Vérification syntaxique Python & JS
+        run: |
+          python3 -B -m py_compile backend/*.py packaging/build_deb.py
+          node --check cockpit/api.js cockpit/profiles.js cockpit/app.js
+
+      - name: Tests unitaires Python
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Tests frontend & CSP Cockpit
+        run: node --test tests/test_frontend.mjs
+
+      - name: Cohérence de version sur tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          DEB_VER="$(python3 -c 'import importlib.util; s=importlib.util.spec_from_file_location("b","packaging/build_deb.py"); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.VERSION)')"
+          if [[ "$TAG_VER" != "$DEB_VER" ]]; then
+            echo "::error::Le tag ($TAG_VER) ne correspond pas à packaging/build_deb.py ($DEB_VER)"
+            exit 1
+          fi
+          echo "Version cohérente : $TAG_VER"
+
+  build-debian13:
+    name: Build & Vérification .deb (Debian 13 Trixie)
+    needs: tests
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Installer les outils de build Debian 13
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            python3 \
+            systemd \
+            ca-certificates
+
+      - name: Tests unitaires Python sous Debian 13
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Construire le paquet .deb
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${INPUT_VERSION}" ]]; then
+            VERSION="${INPUT_VERSION}"
+          else
+            VERSION="$(python3 -c 'import importlib.util; s=importlib.util.spec_from_file_location("b","packaging/build_deb.py"); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.VERSION)')"
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([~+-][0-9A-Za-z.+~-]+)?$ ]]; then
+            echo "::error::Format de version invalide : $VERSION"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          python3 packaging/build_deb.py --out dist --version "$VERSION"
+          DEB="dist/cockpit-rclone_${VERSION}_all.deb"
+          dpkg-deb -I "$DEB"
+          dpkg-deb -c "$DEB"
+          (cd dist && sha256sum "cockpit-rclone_${VERSION}_all.deb" > SHA256SUMS.deb.txt)
+          cat dist/SHA256SUMS.deb.txt
+
+      - name: Vérifier l'installation réelle sur Debian 13 Trixie
+        run: |
+          DEB="dist/cockpit-rclone_${VERSION}_all.deb"
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "./$DEB"
+          dpkg -s cockpit-rclone
+          getent passwd cockpit-rclone
+          test "$(stat -c %a /etc/cockpit-rclone)" = "700"
+          test -d /var/cache/cockpit-rclone
+          grep -Eq '^[[:space:]]*user_allow_other[[:space:]]*$' /etc/fuse.conf
+          test -f /usr/share/cockpit/rclone/manifest.json
+          test -x /usr/lib/cockpit-rclone/rclone-ctl.py
+          test -x /usr/lib/cockpit-rclone/rclone-job-runner.py
+          test -x /usr/lib/cockpit-rclone/rclone_oauth_listener.py
+          systemd-analyze verify \
+            /usr/lib/systemd/system/cockpit-rclone-job@.service \
+            /usr/lib/systemd/system/cockpit-rclone-job-dry@.service \
+            /usr/lib/systemd/system/cockpit-rclone-mount@.service \
+            /usr/lib/systemd/system/cockpit-rclone-serve@.service
+
+      - name: Publier l'artefact .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: cockpit-rclone-debian13-deb
+          path: |
+            dist/cockpit-rclone_*.deb
+            dist/SHA256SUMS.deb.txt
+          if-no-files-found: error
+
+  release:
+    name: Publier la Release GitHub
+    needs:
+      - build-debian13
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Télécharger les paquets construits
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Préparer SHA256SUMS.txt
+        run: |
+          cd release-assets
+          cat SHA256SUMS.*.txt > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Créer ou mettre à jour la Release GitHub
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ASSETS=(release-assets/*.deb release-assets/SHA256SUMS.txt)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+          else
+            gh release create "$TAG" "${ASSETS[@]}" \
+              --title "cockpit-rclone ${TAG}" \
+              --generate-notes
+          fi
